@@ -87,3 +87,22 @@ Agent returns `{ "passed": bool, "violations": [...], "summary": "..." }`.
 Test fails if `passed` is `false` or `violations` is non-empty.
 
 **Files**: `example/` = reference files, `input/` = test inputs, `output/` = generated output.
+
+## Packaging
+
+To build the standalone executable:
+
+```bash
+uv run pyinstaller --onefile --windowed --name excel-generator main.py
+```
+
+The binary is created at `dist/excel-generator` (macOS/Linux) or `dist/excel-generator.exe` (Windows).
+
+Run it directly — no Python installation required.
+
+Note: on macOS, Homebrew Python 3.14 does not ship with Tk support by default.
+Install it first: `brew install python-tk@3.14`
+
+## Restrictions
+- Do not run commands with sudo or admin privileges.
+- Do not write to system directories (e.g., `/usr`, `C:\Windows`).

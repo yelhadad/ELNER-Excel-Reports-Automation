@@ -1,0 +1,18 @@
+[project]
+name = "excel-automation"
+version = "0.1.0"
+description = "Generate working paper sheets in Excel financial workbooks"
+requires-python = ">=3.14"
+dependencies = [
+    "openpyxl>=3.1.5",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+    "pyinstaller>=6.19.0",
+    "pytest>=9.0.2",
+]
