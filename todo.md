@@ -419,7 +419,7 @@
 - [x] Add `build/` to `.gitignore` (if not already done)
 - [x] Add `*.spec` to `.gitignore` (if not already done)
 - [x] Document packaging steps in `CLAUDE.md`
-- [ ] Verify the `.exe` works without Python installed (Windows)
+- [ ] Verify the `.exe` works without Python installed (Windows) — N/A: macOS build only
 
 ---
 
@@ -432,6 +432,6 @@
 - [x] Verify col G formulas evaluate correctly when opened in Excel
 - [ ] Run `uv run pytest` and confirm all deterministic tests pass
 - [ ] Run agent validator tests and confirm all pass
-- [ ] Review all type annotations with `uv run mypy` (if added as dev dep)
+- [x] Review all type annotations with `uv run mypy` (if added as dev dep)
 - [x] Remove any debug print statements
-- [ ] Commit final working code to git
+- [x] Commit final working code to git
