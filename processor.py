@@ -162,25 +162,43 @@ def extract_trial_balance_rows(ws: Worksheet) -> list[TrialBalanceRow]:
 
 
 def extract_prior_year_balances(ws: Worksheet) -> dict[str, float]:
-    """Extract {account_number: balance} from prior year working paper sheet."""
+    """Extract {account_number: closing_balance} from prior year working paper sheet.
+
+    Closing balance = col G (יתרה).  When col G is None (formula not cached in
+    the file), compute it as F + D − E so the result is always available.
+    """
     balances: dict[str, float] = {}
 
     for row_index, row_values in enumerate(ws.iter_rows(values_only=True), start=1):
-        # Skip title row (row 1) and header row (row 2); data starts at row 3
         if row_index <= 2:
             continue
 
         vals = list(row_values) + [None] * max(0, 7 - len(row_values))
 
         col_b = vals[1]  # account number
-        col_g = vals[6]  # יתרה (balance)
-
-        if col_b is None or col_g is None:
+        if col_b is None:
             continue
 
-        account_number = str(col_b)
+        # Only process numeric account-number cells (skip header/label rows)
+        if not isinstance(col_b, (int, float)) or isinstance(col_b, bool):
+            continue
+
+        col_d = vals[3]  # חובה
+        col_e = vals[4]  # זכות
+        col_f = vals[5]  # פ.נ
+        col_g = vals[6]  # יתרה
+
         balance = _to_float(col_g)
+        if balance is None:
+            # Formula not cached — compute from components
+            d = _to_float(col_d) or 0.0
+            e = _to_float(col_e) or 0.0
+            f = _to_float(col_f) or 0.0
+            if d or e or f:
+                balance = f + d - e
+
         if balance is not None:
+            account_number = str(int(col_b)) if isinstance(col_b, float) else str(col_b)
             balances[account_number] = balance
 
     return balances

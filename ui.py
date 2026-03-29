@@ -11,7 +11,6 @@ import tkinter.messagebox
 from pathlib import Path
 
 from processor import load_workbook_data
-from parser import generate_working_paper_rows
 from constructor import generate_working_paper
 
 
@@ -89,8 +88,7 @@ class App(tk.Tk):
         try:
             path = Path(path_str)
             data = load_workbook_data(path)
-            rows = generate_working_paper_rows(data)
-            output_path = generate_working_paper(data, rows)
+            output_path = generate_working_paper(data)
             self.after(0, self._on_success, output_path)
         except Exception as e:
             self.after(0, self._on_error, str(e))

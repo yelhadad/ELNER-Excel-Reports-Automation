@@ -66,7 +66,9 @@ def generate_working_paper_rows(data: WorkbookData) -> list[WorkingPaperRow]:
 
         elif tb.row_type == "account":
             debit, credit = _split_debit_credit(tb.debit, tb.credit)
-            opening = data.prior_year_balances.get(tb.account_number or "", 0.0)
+            # None for new accounts (no prior-year entry); 0.0 only if explicitly zero
+            opening_val = data.prior_year_balances.get(tb.account_number or "")
+            opening = float(opening_val) if opening_val is not None else None
             rows.append(WorkingPaperRow(
                 row_type="account",
                 group=tb.group,
