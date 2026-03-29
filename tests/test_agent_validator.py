@@ -113,7 +113,6 @@ def invoke_validator_agent(prompt: str) -> dict[str, Any]:
     return json.loads(response)
 
 
-@pytest.mark.slow
 @pytest.fixture(params=sorted(INPUT_DIR.glob("*.xlsx")), ids=lambda p: p.stem)
 def validated_pipeline(request: pytest.FixtureRequest) -> tuple[WorkbookData, Path]:
     input_path: Path = request.param
