@@ -30,21 +30,44 @@ class WorkingPaperRow:
 
 # ── Style constants ───────────────────────────────────────────────────────────
 
-GREEN_FILL = PatternFill(fill_type="solid", fgColor="FF92D050")
-YELLOW_FILL = PatternFill(fill_type="solid", fgColor="FFFFFF00")
+EXISTING_FILL = PatternFill(fill_type="solid", fgColor="FF92D050")  # green
+MISSING_FILL  = PatternFill(fill_type="solid", fgColor="FFFFFF00")  # yellow
+NEW_FILL      = PatternFill(fill_type="solid", fgColor="FF00B0F0")  # blue
+
+GREEN_FILL  = EXISTING_FILL
+YELLOW_FILL = MISSING_FILL
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _normalize_account(val: Any) -> str | None:
-    """Normalise account/group numbers: int 1001 or float 1001.0 → '1001'."""
+    """Normalise account/group numbers to a canonical string.
+
+    int/float -> str without decimal: 1001.0 -> '1001'
+    Numeric strings with leading zeros stripped: '0253' -> '253'
+    """
     if val is None:
         return None
     if isinstance(val, float) and val.is_integer():
         return str(int(val))
     if isinstance(val, int):
         return str(val)
-    return str(val).strip() or None
+    s = str(val).strip()
+    if s and s.isdigit():
+        return str(int(s))
+    return s or None
+
+
+def _is_account_cell(val: Any) -> bool:
+    """True if val is a numeric account/group number (int, float, or numeric string)."""
+    if isinstance(val, bool):
+        return False
+    if isinstance(val, (int, float)):
+        return True
+    if isinstance(val, str):
+        s = val.strip()
+        return bool(s) and s.isdigit()
+    return False
 
 
 def _split_debit_credit(
@@ -62,10 +85,62 @@ def _split_debit_credit(
     return 0.0, None
 
 
-def _parse_sum_range(formula: str) -> tuple[int, int] | None:
-    """'=SUM(G3:G9)' → (3, 9), otherwise None."""
-    m = re.match(r"=SUM\(G(\d+):G(\d+)\)", formula or "")
-    return (int(m.group(1)), int(m.group(2))) if m else None
+def _remap_row_refs(formula: str, orig_to_new: dict[int, int]) -> str:
+    """Replace all cell row-number references in a formula using orig_to_new."""
+    def replacer(m: re.Match) -> str:
+        col = m.group(1)
+        row = int(m.group(2))
+        return f"{col}{orig_to_new.get(row, row)}"
+    return re.sub(r'([A-Za-z]+)(\d+)', replacer, formula)
+
+
+def _parse_col_sum_range(formula: str) -> tuple[str, int, int] | None:
+    """Parse =SUM(Xn:Xm) for a single same-column range.
+
+    Returns (col_letter, start_row, end_row) or None.
+    Works for any column: G, D, E, H, etc.
+    """
+    m = re.match(r"=SUM\(([A-Za-z]+)(\d+):([A-Za-z]+)(\d+)\)", formula or "", re.IGNORECASE)
+    if m and m.group(1).upper() == m.group(3).upper():
+        return (m.group(1).upper(), int(m.group(2)), int(m.group(4)))
+    return None
+
+
+def _extend_sum_formula(
+    formula: str,
+    orig_to_new: dict[int, int],
+    new_account_insertions: list[tuple[int, int | None]],
+    last_template_acct_orig: int,
+) -> str:
+    """Remap row refs in a formula and extend SUM range to cover new accounts.
+
+    - Inserted accounts (inserted_after_orig_row not None): extend if within
+      the SUM's original range (section-scoped).
+    - Appended accounts (inserted_after_orig_row is None): extend only for
+      grand-total SUMs whose end covers the last template account row.
+    """
+    orig_range = _parse_col_sum_range(formula)
+    remapped = _remap_row_refs(formula, orig_to_new)
+
+    if orig_range is None:
+        return remapped
+
+    col_letter, orig_start, orig_end = orig_range
+    parsed_new = _parse_col_sum_range(remapped)
+    if parsed_new is None:
+        return remapped
+
+    _, new_start, new_end = parsed_new
+
+    for acct_row, after_orig in new_account_insertions:
+        if after_orig is not None:
+            should_extend = orig_start <= after_orig <= orig_end
+        else:
+            should_extend = orig_end >= last_template_acct_orig
+        if should_extend and acct_row > new_end:
+            new_end = acct_row
+
+    return f"=SUM({col_letter}{new_start}:{col_letter}{new_end})"
 
 
 def _copy_cell(src: Any, dst: Any) -> None:
@@ -84,67 +159,71 @@ def _build_output_rows(
     prior_ws: Worksheet,
     new_accounts: list[TrialBalanceRow],
 ) -> list[dict]:
-    """
-    Build the ordered list of rows for the new sheet:
-    - All prior-year rows in their original order.
-    - New accounts inserted immediately after the last existing row
-      whose group matches their group.
-    """
-    template: list[dict] = []
-    for row in prior_ws.iter_rows():
-        cells = list(row)
-        col_b = cells[1].value if len(cells) > 1 else None
-        col_h = cells[7].value if len(cells) > 7 else None
-        group_val = cells[0].value if cells else None
-
-        # Account rows have a numeric col B (int or float), not a string header
-        is_account = isinstance(col_b, (int, float)) and not isinstance(col_b, bool)
-        template.append({
-            "orig_row": cells[0].row,
-            "cells": cells,
-            "account_num": _normalize_account(col_b),
-            "group": _normalize_account(group_val),
-            "is_account": is_account,
-            "sum_range": (
-                _parse_sum_range(col_h)
-                if isinstance(col_h, str)
-                else None
-            ),
-        })
-
-    # Last template-list index for each group
-    group_last_idx: dict[str, int] = {}
-    for i, t in enumerate(template):
-        if t["is_account"] and t["group"]:
-            group_last_idx[t["group"]] = i
-
-    # New accounts by group
+    """Build the ordered list of rows for the new sheet."""
     new_by_group: dict[str, list[TrialBalanceRow]] = {}
     for tb in new_accounts:
         g = _normalize_account(tb.group) or ""
         new_by_group.setdefault(g, []).append(tb)
+
+    template: list[dict] = []
+    for row in prior_ws.iter_rows():
+        cells = list(row)
+        col_b = cells[1].value if len(cells) > 1 else None
+        group_val = cells[0].value if cells else None
+        is_account = _is_account_cell(col_b)
+        template.append({
+            "orig_row": cells[0].row,
+            "cells": cells,
+            "account_num": _normalize_account(col_b),
+            "group": _normalize_account(group_val) if is_account else None,
+            "is_account": is_account,
+        })
+
+    group_last_idx: dict[str, int] = {}
+    for i, t in enumerate(template):
+        if t["is_account"] and t["group"]:
+            group_last_idx[t["group"]] = i
 
     output: list[dict] = []
     inserted_groups: set[str] = set()
 
     for i, t in enumerate(template):
         output.append(t)
-        if t["is_account"] and t["group"]:
-            g = t["group"]
-            if (
-                i == group_last_idx.get(g)
-                and g not in inserted_groups
-                and g in new_by_group
-            ):
-                for tb in new_by_group[g]:
-                    output.append({"is_new": True, "tb": tb})
-                inserted_groups.add(g)
+        if t["is_account"] and t["group"] and group_last_idx.get(t["group"]) == i:
+            group = t["group"]
+            if group in new_by_group and group not in inserted_groups:
+                for tb in sorted(
+                    new_by_group[group],
+                    key=lambda x: _normalize_account(x.account_number) or "",
+                ):
+                    output.append({"is_new": True, "tb": tb, "inserted_after_orig_row": t["orig_row"]})
+                inserted_groups.add(group)
 
-    # Groups with no existing template rows → append at end
-    for g, tbs in new_by_group.items():
-        if g not in inserted_groups:
-            for tb in tbs:
-                output.append({"is_new": True, "tb": tb})
+    # Remaining new accounts whose group had no template match.
+    # Insert just after the last template account row (before grand-total rows)
+    # to avoid circular references and to be covered by grand-total SUM ranges.
+    remaining = sorted(
+        [tb for tb in new_accounts if (_normalize_account(tb.group) or "") not in inserted_groups],
+        key=lambda tb: (
+            _normalize_account(tb.group) or "",
+            _normalize_account(tb.account_number) or "",
+        ),
+    )
+    if remaining:
+        last_tmpl_acct_idx = max(
+            (i for i, row in enumerate(output)
+             if not row.get("is_new") and row["is_account"]),
+            default=len(output) - 1,
+        )
+        last_tmpl_acct_orig = output[last_tmpl_acct_idx]["orig_row"]
+        insert_at = last_tmpl_acct_idx + 1
+        for tb in remaining:
+            output.insert(insert_at, {
+                "is_new": True,
+                "tb": tb,
+                "inserted_after_orig_row": last_tmpl_acct_orig,
+            })
+            insert_at += 1
 
     return output
 
@@ -158,24 +237,18 @@ def _write_output_rows(
 ) -> None:
     """Write all rows to the new worksheet, updating values and formulas."""
 
-    # Column widths / hidden flags
     for col_letter, col_dim in prior_ws.column_dimensions.items():
         ws.column_dimensions[col_letter].width = col_dim.width
         ws.column_dimensions[col_letter].hidden = col_dim.hidden
 
-    # orig_row → new_row_num (for SUM formula translation)
     orig_to_new: dict[int, int] = {}
-    # group → new row numbers of newly inserted accounts
-    new_acct_rows_by_group: dict[str, list[int]] = {}
-    # (new_anchor_row, orig_start, orig_end) collected for post-processing
-    sum_anchors: list[tuple[int, int, int]] = []
-
-    # Track which accounts have already received D/E values (to avoid duplicates)
     assigned_accounts: set[str] = set()
+    new_account_insertions: list[tuple[int, int | None]] = []
+    template_rows_written: list[tuple[int, dict]] = []
 
+    # ── First pass ────────────────────────────────────────────────────────────
     for new_row_num, row in enumerate(output_rows, start=1):
 
-        # ── Newly inserted account (not in prior year) ────────────────────
         if row.get("is_new"):
             tb: TrialBalanceRow = row["tb"]
             group = _normalize_account(tb.group) or ""
@@ -189,82 +262,76 @@ def _write_output_rows(
             ws.cell(new_row_num, 3).value = tb.account_name
             ws.cell(new_row_num, 4).value = debit
             ws.cell(new_row_num, 5).value = credit
-            # F column: not written (feature pending)
-            ws.cell(new_row_num, 7).value = f"=F{new_row_num}+D{new_row_num}-E{new_row_num}"
-            # Yellow = new account, did not exist in prior year
+            ws.cell(new_row_num, 7).value = f"=D{new_row_num}+E{new_row_num}"
             for col in range(1, 6):
-                ws.cell(new_row_num, col).fill = copy_obj(YELLOW_FILL)
-            new_acct_rows_by_group.setdefault(group, []).append(new_row_num)
+                ws.cell(new_row_num, col).fill = copy_obj(NEW_FILL)
+
+            new_account_insertions.append((new_row_num, row.get("inserted_after_orig_row")))
             continue
 
-        # ── Template row ──────────────────────────────────────────────────
-        orig_row = row["orig_row"]
+        orig_row: int = row["orig_row"]
         orig_to_new[orig_row] = new_row_num
         cells: list = row["cells"]
 
-        # Copy every cell (value + style)
         for cell in cells:
             _copy_cell(cell, ws.cell(new_row_num, cell.column))
 
-        # Row height
         src_height = prior_ws.row_dimensions[orig_row].height
         if src_height:
             ws.row_dimensions[new_row_num].height = src_height
 
         if row["is_account"]:
             account_num = row["account_num"] or ""
+            ws.cell(new_row_num, 6).value = None  # F always empty
 
-            # F column: not written (feature pending)
-            ws.cell(new_row_num, 6).value = None
-
-            # D / E from new year trial balance — only for the first occurrence
-            # of each account number to prevent duplicate rows showing the same value
             tb_row = tb_by_account.get(account_num)
             if tb_row and account_num not in assigned_accounts:
                 debit, credit = _split_debit_credit(tb_row.debit, tb_row.credit)
                 ws.cell(new_row_num, 4).value = debit
                 ws.cell(new_row_num, 5).value = credit
                 assigned_accounts.add(account_num)
-            else:
-                # Duplicate occurrence or not in 2024 — clear D/E
+                for col in range(1, 6):
+                    ws.cell(new_row_num, col).fill = copy_obj(EXISTING_FILL)
+            elif tb_row:
+                # Duplicate template row for an account that IS in new TB
                 ws.cell(new_row_num, 4).value = None
                 ws.cell(new_row_num, 5).value = None
+                for col in range(1, 6):
+                    ws.cell(new_row_num, col).fill = copy_obj(EXISTING_FILL)
+            else:
+                ws.cell(new_row_num, 4).value = None
+                ws.cell(new_row_num, 5).value = None
+                for col in range(1, 6):
+                    ws.cell(new_row_num, col).fill = copy_obj(MISSING_FILL)
 
-            # Green = existed in prior year (all template rows)
-            for col in range(1, 6):
-                ws.cell(new_row_num, col).fill = copy_obj(GREEN_FILL)
+            ws.cell(new_row_num, 7).value = f"=D{new_row_num}+E{new_row_num}"
 
-            # G formula
-            ws.cell(new_row_num, 7).value = f"=F{new_row_num}+D{new_row_num}-E{new_row_num}"
+        template_rows_written.append((new_row_num, row))
 
-            if row["sum_range"]:
-                sum_anchors.append((new_row_num, row["sum_range"][0], row["sum_range"][1]))
+    # ── Second pass: remap and extend all formula cells ───────────────────────
+    last_template_acct_orig = max(
+        (row["orig_row"] for _, row in template_rows_written if row["is_account"]),
+        default=0,
+    )
 
-        else:
-            # Non-account row: rewrite G formula if present
-            g_cell = ws.cell(new_row_num, 7)
-            if isinstance(g_cell.value, str) and re.search(r"=[DF]\d+", g_cell.value):
-                g_cell.value = f"=F{new_row_num}+D{new_row_num}-E{new_row_num}"
+    for new_row_num, row in template_rows_written:
+        # H column: remap + extend (all rows)
+        h_cell = ws.cell(new_row_num, 8)
+        if isinstance(h_cell.value, str) and h_cell.value.startswith("="):
+            h_cell.value = _extend_sum_formula(
+                h_cell.value, orig_to_new, new_account_insertions, last_template_acct_orig
+            )
 
-    # ── Update H SUM formulas ─────────────────────────────────────────────
-    for new_anchor_row, orig_start, orig_end in sum_anchors:
-        new_start = orig_to_new.get(orig_start, orig_start)
-        new_end = orig_to_new.get(orig_end, orig_end)
-
-        # Collect groups whose accounts were in the original SUM range
-        groups_in_range: set[str] = set()
-        for row in output_rows:
-            if not row.get("is_new") and row["is_account"]:
-                if orig_start <= row["orig_row"] <= orig_end and row["group"]:
-                    groups_in_range.add(row["group"])
-
-        # Extend end to include any new accounts inserted for those groups
-        for g in groups_in_range:
-            inserted = new_acct_rows_by_group.get(g, [])
-            if inserted:
-                new_end = max(new_end, max(inserted))
-
-        ws.cell(new_anchor_row, 8).value = f"=SUM(G{new_start}:G{new_end})"
+        if not row["is_account"]:
+            # All other formula columns in non-account rows
+            for col_idx in range(1, 12):
+                if col_idx == 8:
+                    continue
+                cell = ws.cell(new_row_num, col_idx)
+                if isinstance(cell.value, str) and cell.value.startswith("="):
+                    cell.value = _extend_sum_formula(
+                        cell.value, orig_to_new, new_account_insertions, last_template_acct_orig
+                    )
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -272,11 +339,9 @@ def _write_output_rows(
 def generate_working_paper(data: WorkbookData) -> Path:
     """Generate the new working paper sheet using the prior year sheet as a template."""
 
-    # Load with formulas preserved (not data_only) so we can copy styles + formula strings
     wb = openpyxl.load_workbook(data.workbook_path)
     prior_ws: Worksheet = wb[str(data.prior_year)]
 
-    # Trial balance lookup by normalised account number
     tb_by_account: dict[str, TrialBalanceRow] = {}
     for tb in data.trial_balance_rows:
         if tb.row_type == "account" and tb.account_number:
@@ -284,15 +349,15 @@ def generate_working_paper(data: WorkbookData) -> Path:
             if key:
                 tb_by_account[key] = tb
 
-    # Accounts already in the prior year template
     prior_accounts: set[str] = set()
     for row in prior_ws.iter_rows():
         cells = list(row)
-        acct = _normalize_account(cells[1].value if len(cells) > 1 else None)
-        if acct:
-            prior_accounts.add(acct)
+        col_b = cells[1].value if len(cells) > 1 else None
+        if _is_account_cell(col_b):
+            acct = _normalize_account(col_b)
+            if acct:
+                prior_accounts.add(acct)
 
-    # New accounts: in 2024 trial balance but absent from 2023 template
     new_accounts = [
         tb
         for tb in data.trial_balance_rows
@@ -301,16 +366,16 @@ def generate_working_paper(data: WorkbookData) -> Path:
         and (_normalize_account(tb.account_number) or "") not in prior_accounts
     ]
 
-    # Build ordered output row list
     output_rows = _build_output_rows(prior_ws, new_accounts)
 
-    # Create the new sheet
     sheet_name = str(data.new_year)
     if sheet_name in wb.sheetnames:
         raise ValueError(f"Sheet '{sheet_name}' already exists")
     new_ws: Worksheet = wb.create_sheet(sheet_name)
 
-    # Position immediately after מאזן <year>
+    # Copy right-to-left reading order from prior year sheet (Hebrew layout)
+    new_ws.sheet_view.rightToLeft = prior_ws.sheet_view.rightToLeft
+
     target_name = f"מאזן {data.new_year}"
     if target_name in wb.sheetnames:
         target_idx = wb.sheetnames.index(target_name)
@@ -319,17 +384,14 @@ def generate_working_paper(data: WorkbookData) -> Path:
         if offset:
             wb.move_sheet(sheet_name, offset)
 
-    # Write rows with updated values
     _write_output_rows(new_ws, output_rows, tb_by_account, data.prior_year_balances, prior_ws)
 
-    # Copy merged cells
     for merged_range in prior_ws.merged_cells.ranges:
         try:
             new_ws.merge_cells(str(merged_range))
         except Exception:
             pass
 
-    # Save to output/
     output_dir = Path(__file__).parent / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / data.workbook_path.name
