@@ -8,6 +8,7 @@ from typing import Literal, Any
 from pathlib import Path
 
 import openpyxl
+from openpyxl.workbook.workbook import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.styles import PatternFill
 
@@ -112,13 +113,7 @@ def _extend_sum_formula(
     new_account_insertions: list[tuple[int, int | None]],
     last_template_acct_orig: int,
 ) -> str:
-    """Remap row refs in a formula and extend SUM range to cover new accounts.
-
-    - Inserted accounts (inserted_after_orig_row not None): extend if within
-      the SUM's original range (section-scoped).
-    - Appended accounts (inserted_after_orig_row is None): extend only for
-      grand-total SUMs whose end covers the last template account row.
-    """
+    """Remap row refs in a formula and extend SUM range to cover new accounts."""
     orig_range = _parse_col_sum_range(formula)
     remapped = _remap_row_refs(formula, orig_to_new)
 
@@ -151,6 +146,56 @@ def _copy_cell(src: Any, dst: Any) -> None:
         dst.border = copy_obj(src.border)
         dst.alignment = copy_obj(src.alignment)
         dst.number_format = src.number_format
+
+
+def _remap_cross_sheet_refs(
+    wb: Workbook,
+    new_sheet_name: str,
+    orig_to_new: dict[int, int],
+) -> None:
+    """Update row references to the newly generated sheet in all other sheets.
+
+    When new accounts are inserted into the generated working paper, rows shift.
+    Any sheet (e.g. 'דוחות כספיים') that references specific rows of the new
+    working paper by row number needs those references remapped using orig_to_new
+    (which maps prior-year template row -> new working paper row).
+
+    Only remaps references that contain no #REF! to avoid mangling already-broken
+    formulas.
+    """
+    if not orig_to_new:
+        return
+
+    escaped_name = re.escape(new_sheet_name)
+    pattern = re.compile(
+        r"('" + escaped_name + r"'!|" + escaped_name + r"!)([A-Z]+)(\d+)",
+        re.IGNORECASE,
+    )
+
+    def _remap_match(m: re.Match) -> str:
+        prefix = m.group(1)
+        col = m.group(2)
+        row = int(m.group(3))
+        new_row = orig_to_new.get(row, row)
+        return f"{prefix}{col}{new_row}"
+
+    for ws_name in wb.sheetnames:
+        if ws_name == new_sheet_name:
+            continue
+        ws = wb[ws_name]
+        for row in ws.iter_rows():
+            for cell in row:
+                if not isinstance(cell.value, str):
+                    continue
+                if not cell.value.startswith("="):
+                    continue
+                if "#REF!" in cell.value:
+                    continue
+                if new_sheet_name not in cell.value:
+                    continue
+                new_formula = pattern.sub(_remap_match, cell.value)
+                if new_formula != cell.value:
+                    cell.value = new_formula
 
 
 # ── Core template-based generation ───────────────────────────────────────────
@@ -199,9 +244,6 @@ def _build_output_rows(
                     output.append({"is_new": True, "tb": tb, "inserted_after_orig_row": t["orig_row"]})
                 inserted_groups.add(group)
 
-    # Remaining new accounts whose group had no template match.
-    # Insert just after the last template account row (before grand-total rows)
-    # to avoid circular references and to be covered by grand-total SUM ranges.
     remaining = sorted(
         [tb for tb in new_accounts if (_normalize_account(tb.group) or "") not in inserted_groups],
         key=lambda tb: (
@@ -234,8 +276,12 @@ def _write_output_rows(
     tb_by_account: dict[str, TrialBalanceRow],
     prior_year_balances: dict[str, float],
     prior_ws: Worksheet,
-) -> None:
-    """Write all rows to the new worksheet, updating values and formulas."""
+) -> dict[int, int]:
+    """Write all rows to the new worksheet, updating values and formulas.
+
+    Returns orig_to_new mapping (prior-year template row -> new sheet row) so
+    the caller can update cross-sheet references in other sheets.
+    """
 
     for col_letter, col_dim in prior_ws.column_dimensions.items():
         ws.column_dimensions[col_letter].width = col_dim.width
@@ -293,7 +339,6 @@ def _write_output_rows(
                 for col in range(1, 6):
                     ws.cell(new_row_num, col).fill = copy_obj(EXISTING_FILL)
             elif tb_row:
-                # Duplicate template row for an account that IS in new TB
                 ws.cell(new_row_num, 4).value = None
                 ws.cell(new_row_num, 5).value = None
                 for col in range(1, 6):
@@ -315,7 +360,6 @@ def _write_output_rows(
     )
 
     for new_row_num, row in template_rows_written:
-        # H column: remap + extend (all rows)
         h_cell = ws.cell(new_row_num, 8)
         if isinstance(h_cell.value, str) and h_cell.value.startswith("="):
             h_cell.value = _extend_sum_formula(
@@ -323,7 +367,6 @@ def _write_output_rows(
             )
 
         if not row["is_account"]:
-            # All other formula columns in non-account rows
             for col_idx in range(1, 12):
                 if col_idx == 8:
                     continue
@@ -332,6 +375,8 @@ def _write_output_rows(
                     cell.value = _extend_sum_formula(
                         cell.value, orig_to_new, new_account_insertions, last_template_acct_orig
                     )
+
+    return orig_to_new
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -373,7 +418,6 @@ def generate_working_paper(data: WorkbookData) -> Path:
         raise ValueError(f"Sheet '{sheet_name}' already exists")
     new_ws: Worksheet = wb.create_sheet(sheet_name)
 
-    # Copy right-to-left reading order from prior year sheet (Hebrew layout)
     new_ws.sheet_view.rightToLeft = prior_ws.sheet_view.rightToLeft
 
     target_name = f"מאזן {data.new_year}"
@@ -384,7 +428,12 @@ def generate_working_paper(data: WorkbookData) -> Path:
         if offset:
             wb.move_sheet(sheet_name, offset)
 
-    _write_output_rows(new_ws, output_rows, tb_by_account, data.prior_year_balances, prior_ws)
+    orig_to_new = _write_output_rows(
+        new_ws, output_rows, tb_by_account, data.prior_year_balances, prior_ws
+    )
+
+    # Update cross-sheet references in all other sheets (e.g. דוחות כספיים)
+    _remap_cross_sheet_refs(wb, sheet_name, orig_to_new)
 
     for merged_range in prior_ws.merged_cells.ranges:
         try:
