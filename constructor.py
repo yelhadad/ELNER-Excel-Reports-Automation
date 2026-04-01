@@ -10,7 +10,7 @@ from pathlib import Path
 import openpyxl
 from openpyxl.workbook.workbook import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Border, Font, PatternFill, Side
 
 from processor import WorkbookData, TrialBalanceRow
 
@@ -37,6 +37,11 @@ NEW_FILL      = PatternFill(fill_type="solid", fgColor="FF00B0F0")  # blue
 
 GREEN_FILL  = EXISTING_FILL
 YELLOW_FILL = MISSING_FILL
+
+_THIN_SIDE   = Side(style='thin')
+_THIN_BORDER = Border(
+    left=_THIN_SIDE, right=_THIN_SIDE, top=_THIN_SIDE, bottom=_THIN_SIDE
+)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -147,12 +152,21 @@ _COLOR_TAG_RE = re.compile(
 
 
 def _strip_bracket_neg(fmt: str) -> str:
-    """Strip color tags and convert bracket-negative to minus-negative.
+    """Neutralize an Excel number format for G column display.
 
-    '#,##0;[Red](#,##0)'  -> '#,##0;-#,##0'
-    '_(* #,##0_);_(* (#,##0)' -> '_(* #,##0_);_(* -#,##0'
+    Removes:
+    - Color tags like [Red], [Blue]
+    - Fill characters (*X) that cause ###### when column is narrow
+    - Bracket-negative notation (n) -> converts to -n
     """
+    if not fmt:
+        return '#,##0;-#,##0'
+    # Remove color tags
     fmt = _COLOR_TAG_RE.sub('', fmt)
+    # Remove fill characters: *X means "repeat X to fill column width"
+    # These cause ###### when the column is too narrow.
+    fmt = re.sub(r'\*.', '', fmt)
+    # Convert bracket-negatives in the second section
     parts = fmt.split(';')
     if len(parts) >= 2:
         parts[1] = re.sub(r'\(([^)]+)\)', r'-\1', parts[1])
@@ -160,12 +174,30 @@ def _strip_bracket_neg(fmt: str) -> str:
 
 
 def _neutralize_g_cell(cell: Any) -> None:
-    """Apply neutral style to a G column cell: no colored font, no bracket negatives."""
+    """Apply neutral style to a G column cell: no colored font, no bracket negatives,
+    no fill characters (which cause ###### when column is too narrow)."""
     cell.number_format = _strip_bracket_neg(cell.number_format or '#,##0')
     f = cell.font
     cell.font = Font(
         name=f.name, size=f.size, bold=f.bold, italic=f.italic,
         underline=f.underline, strike=f.strike, color='FF000000',
+    )
+
+
+# ── Border helper ─────────────────────────────────────────────────────────────
+
+def _ensure_border(cell: Any) -> None:
+    """Add thin border to any side that currently has no border style.
+
+    Preserves existing thicker/special borders (medium, thick, double, etc.)
+    and only fills in thin where a side is completely absent.
+    """
+    b = cell.border
+    cell.border = Border(
+        left=b.left   if (b.left   and b.left.style)   else _THIN_SIDE,
+        right=b.right if (b.right  and b.right.style)  else _THIN_SIDE,
+        top=b.top     if (b.top    and b.top.style)    else _THIN_SIDE,
+        bottom=b.bottom if (b.bottom and b.bottom.style) else _THIN_SIDE,
     )
 
 
@@ -409,13 +441,24 @@ def _write_output_rows(
                         cell.value, orig_to_new, new_account_insertions, last_template_acct_orig
                     )
 
-    # ── Third pass: neutralize G column (col 7) — no red, no brackets ────────
-    # G = D−E+F so liability accounts produce negative values; strip any
-    # accounting format that would render negatives in red or brackets.
-    for row_num in range(1, len(output_rows) + 1):
+    # ── Third pass: neutralize G column and apply borders to all cells ────────
+    # G neutralization: strip fill chars (fixes #######), color tags, brackets.
+    # Borders: add thin border to any cell side that has no existing border,
+    # preserving thicker template borders (medium/thick/double).
+    total_rows = len(output_rows)
+    for row_num in range(1, total_rows + 1):
+        # G column neutral style
         g_cell = ws.cell(row_num, 7)
         if g_cell.value is not None:
             _neutralize_g_cell(g_cell)
+        # Borders on all columns A–K
+        for col_num in range(1, 12):
+            _ensure_border(ws.cell(row_num, col_num))
+
+    # Ensure G column is wide enough for large subtotals (no more #######)
+    g_dim = ws.column_dimensions['G']
+    if not g_dim.width or g_dim.width < 16:
+        g_dim.width = 16
 
     return orig_to_new
 
