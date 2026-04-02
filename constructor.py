@@ -143,7 +143,7 @@ def _extend_sum_formula(
     return f"=SUM({col_letter}{new_start}:{col_letter}{new_end})"
 
 
-# ── G column neutral formatting ───────────────────────────────────────────────
+# ── F / G column neutral formatting ──────────────────────────────────────────
 
 _COLOR_TAG_RE = re.compile(
     r'\[(?:Red|Blue|Green|Yellow|Black|White|Cyan|Magenta|Color\s*\d+)\]',
@@ -152,30 +152,27 @@ _COLOR_TAG_RE = re.compile(
 
 
 def _strip_bracket_neg(fmt: str) -> str:
-    """Neutralize an Excel number format for G column display.
+    """Neutralize an Excel number format: remove color tags, fill chars, bracket-negatives.
 
-    Removes:
-    - Color tags like [Red], [Blue]
-    - Fill characters (*X) that cause ###### when column is narrow
-    - Bracket-negative notation (n) -> converts to -n
+    - [Red], [Blue] etc. removed
+    - *X fill chars removed (prevent ###### in narrow columns)
+    - (n) bracket-negative converted to -n
     """
     if not fmt:
         return '#,##0;-#,##0'
-    # Remove color tags
     fmt = _COLOR_TAG_RE.sub('', fmt)
-    # Remove fill characters: *X means "repeat X to fill column width"
-    # These cause ###### when the column is too narrow.
-    fmt = re.sub(r'\*.', '', fmt)
-    # Convert bracket-negatives in the second section
+    fmt = re.sub(r'\*.', '', fmt)  # remove fill characters (*X)
     parts = fmt.split(';')
     if len(parts) >= 2:
         parts[1] = re.sub(r'\(([^)]+)\)', r'-\1', parts[1])
     return ';'.join(parts)
 
 
-def _neutralize_g_cell(cell: Any) -> None:
-    """Apply neutral style to a G column cell: no colored font, no bracket negatives,
-    no fill characters (which cause ###### when column is too narrow)."""
+def _neutralize_cell(cell: Any) -> None:
+    """Apply neutral style: no colored font, no bracket negatives, no fill chars.
+
+    Used for F (פ.נ) and G (יתרה) columns.
+    """
     cell.number_format = _strip_bracket_neg(cell.number_format or '#,##0')
     f = cell.font
     cell.font = Font(
@@ -189,14 +186,13 @@ def _neutralize_g_cell(cell: Any) -> None:
 def _ensure_border(cell: Any) -> None:
     """Add thin border to any side that currently has no border style.
 
-    Preserves existing thicker/special borders (medium, thick, double, etc.)
-    and only fills in thin where a side is completely absent.
+    Preserves existing thicker/special borders (medium, thick, double, etc.).
     """
     b = cell.border
     cell.border = Border(
-        left=b.left   if (b.left   and b.left.style)   else _THIN_SIDE,
-        right=b.right if (b.right  and b.right.style)  else _THIN_SIDE,
-        top=b.top     if (b.top    and b.top.style)    else _THIN_SIDE,
+        left=b.left     if (b.left   and b.left.style)   else _THIN_SIDE,
+        right=b.right   if (b.right  and b.right.style)  else _THIN_SIDE,
+        top=b.top       if (b.top    and b.top.style)    else _THIN_SIDE,
         bottom=b.bottom if (b.bottom and b.bottom.style) else _THIN_SIDE,
     )
 
@@ -373,6 +369,7 @@ def _write_output_rows(
             ws.cell(new_row_num, 3).value = tb.account_name
             ws.cell(new_row_num, 4).value = debit
             ws.cell(new_row_num, 5).value = credit
+            # F left empty for new accounts — no prior-year opening balance
             ws.cell(new_row_num, 7).value = f"=D{new_row_num}-E{new_row_num}+F{new_row_num}"
             for col in range(1, 6):
                 ws.cell(new_row_num, col).fill = copy_obj(NEW_FILL)
@@ -393,7 +390,8 @@ def _write_output_rows(
 
         if row["is_account"]:
             account_num = row["account_num"] or ""
-            ws.cell(new_row_num, 6).value = None  # F always empty
+            # F is preserved as-is from the prior-year template (copied above).
+            # Row-ref remapping of F formulas happens in the second pass below.
 
             tb_row = tb_by_account.get(account_num)
             if tb_row and account_num not in assigned_accounts:
@@ -425,13 +423,21 @@ def _write_output_rows(
     )
 
     for new_row_num, row in template_rows_written:
+        # H column: remap + extend (all rows)
         h_cell = ws.cell(new_row_num, 8)
         if isinstance(h_cell.value, str) and h_cell.value.startswith("="):
             h_cell.value = _extend_sum_formula(
                 h_cell.value, orig_to_new, new_account_insertions, last_template_acct_orig
             )
 
-        if not row["is_account"]:
+        if row["is_account"]:
+            # F column on account rows: remap row refs only (no SUM extension —
+            # these are per-row formulas like =D36+E36, not range formulas).
+            f_cell = ws.cell(new_row_num, 6)
+            if isinstance(f_cell.value, str) and f_cell.value.startswith("="):
+                f_cell.value = _remap_row_refs(f_cell.value, orig_to_new)
+        else:
+            # All other formula columns in non-account rows: remap + extend
             for col_idx in range(1, 12):
                 if col_idx == 8:
                     continue
@@ -441,24 +447,28 @@ def _write_output_rows(
                         cell.value, orig_to_new, new_account_insertions, last_template_acct_orig
                     )
 
-    # ── Third pass: neutralize G column and apply borders to all cells ────────
-    # G neutralization: strip fill chars (fixes #######), color tags, brackets.
-    # Borders: add thin border to any cell side that has no existing border,
-    # preserving thicker template borders (medium/thick/double).
+    # ── Third pass: neutralize F/G columns; borders on A–H only ─────────────
+    # F and G: strip fill chars (fixes ######), color tags, bracket-negatives;
+    #          reset font color to black.
+    # Borders: thin on any side missing one — columns A through H only.
     total_rows = len(output_rows)
     for row_num in range(1, total_rows + 1):
-        # G column neutral style
+        f_cell = ws.cell(row_num, 6)
+        if f_cell.value is not None:
+            _neutralize_cell(f_cell)
+
         g_cell = ws.cell(row_num, 7)
         if g_cell.value is not None:
-            _neutralize_g_cell(g_cell)
-        # Borders on all columns A–K
-        for col_num in range(1, 12):
+            _neutralize_cell(g_cell)
+
+        for col_num in range(1, 9):  # A–H only
             _ensure_border(ws.cell(row_num, col_num))
 
-    # Ensure G column is wide enough for large subtotals (no more #######)
-    g_dim = ws.column_dimensions['G']
-    if not g_dim.width or g_dim.width < 16:
-        g_dim.width = 16
+    # Ensure F and G columns are wide enough for large subtotals
+    for col_letter in ('F', 'G'):
+        dim = ws.column_dimensions[col_letter]
+        if not dim.width or dim.width < 16:
+            dim.width = 16
 
     return orig_to_new
 
