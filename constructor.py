@@ -532,7 +532,7 @@ def _write_output_rows(
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-def generate_working_paper(data: WorkbookData) -> Path:
+def generate_working_paper(data: WorkbookData, output_path: Path | None = None) -> Path:
 
     wb = openpyxl.load_workbook(data.workbook_path)
     prior_ws: Worksheet = wb[str(data.prior_year)]
@@ -590,9 +590,12 @@ def generate_working_paper(data: WorkbookData) -> Path:
         except Exception:
             pass
 
-    output_dir = Path(__file__).parent / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / data.workbook_path.name
+    if output_path is None:
+        output_dir = Path(__file__).parent / "output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / data.workbook_path.name
+    else:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
         wb.save(output_path)
