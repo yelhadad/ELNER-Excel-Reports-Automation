@@ -1,0 +1,45 @@
+name: Build Windows Installer
+
+on:
+  push:
+    tags:
+      - "*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-release:
+    name: Build and Upload Windows Installer
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out tagged commit
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Build Windows executable
+        run: uv run pyinstaller --onefile --windowed --name excel-generator main.py
+
+      - name: Upload executable to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          files: dist/excel-generator.exe
+          fail_on_unmatched_files: true
+          generate_release_notes: true
