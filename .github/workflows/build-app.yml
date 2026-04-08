@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build-windows-release:
-    name: Build and Upload Windows Installer
+    name: Build and Upload Windows Releases
     runs-on: windows-latest
 
     steps:
@@ -35,11 +35,20 @@ jobs:
       - name: Build Windows executable
         run: uv run pyinstaller --onefile --windowed --name excel-generator main.py
 
-      - name: Upload executable to GitHub Release
+      - name: Build Windows portable directory
+        run: uv run pyinstaller --windowed --name excel-generator-portable main.py
+
+      - name: Create zip archive
+        run: |
+          cd dist
+          Compress-Object -Path excel-generator-portable -DestinationPath excel-generator-portable.zip
+
+      - name: Upload releases to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          files: dist/excel-generator.exe
+          files: |
+            dist/excel-generator.exe
+            dist/excel-generator-portable.zip
           fail_on_unmatched_files: true
           generate_release_notes: true
