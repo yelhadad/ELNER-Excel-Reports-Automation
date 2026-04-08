@@ -41,7 +41,7 @@ jobs:
       - name: Create zip archive
         run: |
           cd dist
-          Compress-Object -Path excel-generator-portable -DestinationPath excel-generator-portable.zip
+          Compress-Archive -Path excel-generator-portable -DestinationPath excel-generator-portable.zip
 
       - name: Upload releases to GitHub Release
         uses: softprops/action-gh-release@v2
