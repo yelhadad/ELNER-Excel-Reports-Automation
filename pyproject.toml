@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Generate working paper sheets in Excel financial workbooks"
 requires-python = ">=3.14"
 dependencies = [
+    "customtkinter>=5.2.2",
     "openpyxl>=3.1.5",
 ]
 

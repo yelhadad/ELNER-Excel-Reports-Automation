@@ -5,79 +5,170 @@ import os
 import subprocess
 import sys
 import threading
-import tkinter as tk
+from pathlib import Path
+
+import customtkinter as ctk
 import tkinter.filedialog
 import tkinter.messagebox
-from pathlib import Path
 
 from processor import load_workbook_data
 from constructor import generate_working_paper
 
+ctk.set_appearance_mode("System")
+ctk.set_default_color_theme("blue")
 
-class App(tk.Tk):
+
+class App(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Excel Working Paper Generator")
-        self.geometry("600x340")
+        self.geometry("580x380")
         self.resizable(False, False)
         self._full_path: str = ""
         self._dir_full: str = ""
-
-        # Centre frame
-        frame = tk.Frame(self)
-        frame.place(relx=0.5, rely=0.5, anchor="center")
-
-        # File row
-        tk.Label(frame, text="File:").grid(row=0, column=0, padx=8, pady=12, sticky="e")
-        self._filename_var = tk.StringVar(value="No file selected")
-        tk.Label(frame, textvariable=self._filename_var, width=30, anchor="w",
-                 relief="sunken", bg="white", fg="black").grid(row=0, column=1, padx=6, pady=12)
-        tk.Button(frame, text="Browse…", command=self.browse_file).grid(row=0, column=2, padx=8)
-
-        # Mode radios
-        self._mode_var = tk.StringVar(value="inplace")
-        tk.Radiobutton(frame, text="Edit file in place", variable=self._mode_var, value="inplace",
-                       command=self._on_mode_change).grid(row=1, column=0, columnspan=3, sticky="w", padx=8, pady=2)
-        tk.Radiobutton(frame, text="Create new file", variable=self._mode_var, value="newfile",
-                       command=self._on_mode_change).grid(row=2, column=0, sticky="w", padx=8)
-
-        # Dir picker (hidden until "new file" selected)
-        self._dirname_var = tk.StringVar(value="No folder selected")
-        self._dir_label = tk.Label(frame, textvariable=self._dirname_var, width=30, anchor="w",
-                                   relief="sunken", bg="white", fg="black")
-        self._dir_btn = tk.Button(frame, text="Choose Dir…", command=self.browse_dir)
-        self._dir_label.grid(row=2, column=1, padx=6)
-        self._dir_btn.grid(row=2, column=2, padx=8)
-        self._dir_label.grid_remove()
-        self._dir_btn.grid_remove()
-
-        # Generate
-        self._generate_btn = tk.Button(frame, text="Generate", command=self.generate, width=22)
-        self._generate_btn.grid(row=3, column=0, columnspan=3, pady=16)
-
-        # Status
-        self._status_label = tk.Label(frame, text="Ready", fg="gray")
-        self._status_label.grid(row=4, column=0, columnspan=3)
-
-        # Output name (hidden)
-        self._output_label = tk.Label(frame, text="", fg="blue", cursor="hand2")
-        self._output_label.grid(row=5, column=0, columnspan=3, pady=2)
-        self._output_label.grid_remove()
-
-        # Open button (hidden)
-        self._open_btn = tk.Button(frame, text="Open File")
-        self._open_btn.grid(row=6, column=0, columnspan=3, pady=4)
-        self._open_btn.grid_remove()
-
         self._output_path: Path | None = None
+
+        # Main padding frame
+        main = ctk.CTkFrame(self, fg_color="transparent")
+        main.pack(fill="both", expand=True, padx=32, pady=28)
+
+        # Title
+        ctk.CTkLabel(
+            main,
+            text="Working Paper Generator",
+            font=ctk.CTkFont(size=20, weight="bold"),
+        ).pack(anchor="w", pady=(0, 20))
+
+        # File picker row
+        file_frame = ctk.CTkFrame(main, fg_color="transparent")
+        file_frame.pack(fill="x", pady=(0, 8))
+
+        ctk.CTkLabel(file_frame, text="Excel File", font=ctk.CTkFont(size=13, weight="bold")).pack(anchor="w", pady=(0, 4))
+
+        file_row = ctk.CTkFrame(file_frame, fg_color="transparent")
+        file_row.pack(fill="x")
+
+        self._filename_var = ctk.StringVar(value="No file selected")
+        self._file_entry = ctk.CTkEntry(
+            file_row,
+            textvariable=self._filename_var,
+            state="readonly",
+            font=ctk.CTkFont(size=13),
+        )
+        self._file_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+
+        ctk.CTkButton(
+            file_row,
+            text="Browse",
+            width=90,
+            command=self.browse_file,
+        ).pack(side="right")
+
+        # Output mode
+        mode_frame = ctk.CTkFrame(main, fg_color="transparent")
+        mode_frame.pack(fill="x", pady=(12, 0))
+
+        ctk.CTkLabel(mode_frame, text="Output Mode", font=ctk.CTkFont(size=13, weight="bold")).pack(anchor="w", pady=(0, 6))
+
+        self._mode_var = ctk.StringVar(value="inplace")
+
+        ctk.CTkRadioButton(
+            mode_frame,
+            text="Edit file in place",
+            variable=self._mode_var,
+            value="inplace",
+            command=self._on_mode_change,
+        ).pack(anchor="w", pady=2)
+
+        newfile_row = ctk.CTkFrame(mode_frame, fg_color="transparent")
+        newfile_row.pack(fill="x", pady=2)
+
+        ctk.CTkRadioButton(
+            newfile_row,
+            text="Create new file",
+            variable=self._mode_var,
+            value="newfile",
+            command=self._on_mode_change,
+        ).pack(side="left")
+
+        self._dirname_var = ctk.StringVar(value="No folder selected")
+        self._dir_entry = ctk.CTkEntry(
+            newfile_row,
+            textvariable=self._dirname_var,
+            state="readonly",
+            font=ctk.CTkFont(size=13),
+            width=220,
+        )
+        self._dir_btn = ctk.CTkButton(
+            newfile_row,
+            text="Choose Folder",
+            width=110,
+            command=self.browse_dir,
+        )
+        self._dir_entry.pack(side="left", padx=(12, 8), fill="x", expand=True)
+        self._dir_btn.pack(side="left")
+        self._dir_entry.pack_forget()
+        self._dir_btn.pack_forget()
+
+        # Generate button
+        self._generate_btn = ctk.CTkButton(
+            main,
+            text="Generate",
+            height=42,
+            font=ctk.CTkFont(size=15, weight="bold"),
+            command=self.generate,
+        )
+        self._generate_btn.pack(fill="x", pady=(24, 0))
+
+        # Status + progress row
+        status_frame = ctk.CTkFrame(main, fg_color="transparent")
+        status_frame.pack(fill="x", pady=(10, 0))
+
+        self._status_label = ctk.CTkLabel(
+            status_frame,
+            text="Ready",
+            font=ctk.CTkFont(size=13),
+            text_color="gray",
+        )
+        self._status_label.pack(side="left")
+
+        self._progress = ctk.CTkProgressBar(status_frame, mode="indeterminate", width=140)
+        self._progress.pack(side="right")
+        self._progress.pack_forget()
+
+        # Output row (hidden until success)
+        self._output_frame = ctk.CTkFrame(main, fg_color="transparent")
+        self._output_frame.pack(fill="x", pady=(6, 0))
+
+        self._output_label = ctk.CTkLabel(
+            self._output_frame,
+            text="",
+            font=ctk.CTkFont(size=12),
+            text_color=("#1a73e8", "#4da6ff"),
+            cursor="hand2",
+        )
+        self._output_label.pack(side="left")
+
+        self._open_btn = ctk.CTkButton(
+            self._output_frame,
+            text="Open File",
+            width=90,
+            height=30,
+            fg_color="transparent",
+            border_width=1,
+            command=self._open_output,
+        )
+        self._open_btn.pack(side="right")
+
+        self._output_frame.pack_forget()
 
     def _on_mode_change(self) -> None:
         if self._mode_var.get() == "newfile":
-            self._dir_label.grid()
-            self._dir_btn.grid()
+            self._dir_entry.pack(side="left", padx=(12, 8), fill="x", expand=True)
+            self._dir_btn.pack(side="left")
         else:
-            self._dir_label.grid_remove()
-            self._dir_btn.grid_remove()
+            self._dir_entry.pack_forget()
+            self._dir_btn.pack_forget()
 
     def browse_file(self) -> None:
         path = tkinter.filedialog.askopenfilename(
@@ -87,9 +178,8 @@ class App(tk.Tk):
         if path:
             self._full_path = path
             self._filename_var.set(Path(path).name)
-            self._output_label.grid_remove()
-            self._open_btn.grid_remove()
-            self._status_label.config(text="Ready", fg="gray")
+            self._output_frame.pack_forget()
+            self._status_label.configure(text="Ready", text_color="gray")
 
     def browse_dir(self) -> None:
         d = tkinter.filedialog.askdirectory(title="Select output directory")
@@ -97,13 +187,14 @@ class App(tk.Tk):
             self._dir_full = d
             self._dirname_var.set(Path(d).name or d)
 
-    def open_file(self, path: str) -> None:
-        if sys.platform == "darwin":
-            subprocess.Popen(["open", path])
-        elif sys.platform == "win32":
-            os.startfile(path)
-        else:
-            subprocess.Popen(["xdg-open", path])
+    def _open_output(self) -> None:
+        if self._output_path:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", str(self._output_path)])
+            elif sys.platform == "win32":
+                os.startfile(str(self._output_path))
+            else:
+                subprocess.Popen(["xdg-open", str(self._output_path)])
 
     def generate(self) -> None:
         if not self._full_path:
@@ -121,10 +212,11 @@ class App(tk.Tk):
                 return
             output_path = Path(self._dir_full) / Path(self._full_path).name
 
-        self._generate_btn.config(state="disabled")
-        self._status_label.config(text="Processing…", fg="blue")
-        self._output_label.grid_remove()
-        self._open_btn.grid_remove()
+        self._generate_btn.configure(state="disabled")
+        self._output_frame.pack_forget()
+        self._status_label.configure(text="Processing…", text_color=("#1a73e8", "#4da6ff"))
+        self._progress.pack(side="right")
+        self._progress.start()
 
         threading.Thread(target=self._run_pipeline, args=(self._full_path, output_path), daemon=True).start()
 
@@ -138,17 +230,19 @@ class App(tk.Tk):
 
     def _on_success(self, output_path: Path) -> None:
         self._output_path = output_path
-        self._status_label.config(text="Done!", fg="green")
-        self._output_label.config(text=output_path.name)
-        self._output_label.grid()
-        self._open_btn.config(command=lambda: self.open_file(str(output_path)))
-        self._open_btn.grid()
-        self._generate_btn.config(state="normal")
+        self._progress.stop()
+        self._progress.pack_forget()
+        self._status_label.configure(text="Done!", text_color=("#1e8c3a", "#4caf50"))
+        self._output_label.configure(text=output_path.name)
+        self._output_frame.pack(fill="x", pady=(6, 0))
+        self._generate_btn.configure(state="normal")
 
     def _on_error(self, message: str) -> None:
+        self._progress.stop()
+        self._progress.pack_forget()
         tkinter.messagebox.showerror("Error", message)
-        self._status_label.config(text="Error", fg="red")
-        self._generate_btn.config(state="normal")
+        self._status_label.configure(text="Error", text_color=("#c0392b", "#e74c3c"))
+        self._generate_btn.configure(state="normal")
 
 
 def run_app() -> None:

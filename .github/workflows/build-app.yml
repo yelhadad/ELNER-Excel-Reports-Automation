@@ -33,10 +33,10 @@ jobs:
         run: uv sync --group dev
 
       - name: Build Windows executable
-        run: uv run pyinstaller --onefile --windowed --name excel-generator main.py
+        run: uv run pyinstaller --onefile --windowed --name excel-generator --hidden-import customtkinter main.py
 
       - name: Build Windows portable directory
-        run: uv run pyinstaller --windowed --name excel-generator-portable main.py
+        run: uv run pyinstaller --windowed --name excel-generator-portable --hidden-import customtkinter main.py
 
       - name: Create zip archive
         run: |
